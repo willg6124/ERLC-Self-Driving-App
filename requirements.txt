@@ -1,0 +1,29 @@
+# --- core (all platforms, needed for everything including Sim Mode) ---
+opencv-python-headless>=4.8
+numpy>=1.24
+flask>=2.3
+mss>=9.0            # screen capture (also used for sim-mode preview grabs)
+pillow>=10.0
+scikit-learn>=1.3   # for the planned imitation-learning trainer (not yet built)
+joblib>=1.3
+
+# --- real ER:LC control on Windows ---
+# Install these on the Windows PC that's actually running ER:LC. None of
+# them are needed to run the bundled simulator/dashboard or Sim Mode.
+pydirectinput>=1.0.4; sys_platform == "win32"   # real key injection Roblox actually registers
+pywin32>=306; sys_platform == "win32"           # finds the Roblox window for auto-calibration
+keyboard>=0.13.5; sys_platform == "win32"       # global F9 kill switch (works even without window focus)
+pywebview>=4.4                                  # native-feeling wizard/overlay window (optional --
+                                                 # falls back to "open this URL in your browser" without it)
+
+# --- optional: real speed reading via OCR of the in-game speedometer ---
+# Without this, the live app falls back to a rough dead-reckoning speed
+# estimate from recent throttle/brake commands. Also requires installing
+# the Tesseract OCR *binary* separately (not pip-installable):
+# https://github.com/UB-Mannheim/tesseract/wiki (Windows installer)
+pytesseract>=0.3.10
+
+# --- fallback input backend for non-Windows dev machines ---
+# (pydirectinput is Windows-only; this keeps --sim/dev work possible
+# elsewhere, though Roblox itself only ever runs for real on Windows/Mac)
+pynput>=1.7.6; sys_platform != "linux"

@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ERLC Autopilot — Setup</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="wizard-body">
+<div class="wizard-card">
+  <div class="wizard-head">
+    <span class="dot"></span>
+    <h1>ERLC Autopilot Setup</h1>
+  </div>
+  <div class="steps-indicator" id="stepsIndicator">
+    <div class="step-dot active" data-step="1">1<span>Model</span></div>
+    <div class="step-dot" data-step="2">2<span>Locate Game</span></div>
+    <div class="step-dot" data-step="3">3<span>Calibrate</span></div>
+    <div class="step-dot" data-step="4">4<span>Controls</span></div>
+  </div>
+
+  {% if force_sim %}
+  <div class="banner banner-info">
+    Running in <b>Sim Mode</b> (no Windows/Roblox detected on this machine) —
+    this wizard drives the bundled simulator so you can see the real setup
+    flow. On your Windows PC with ER:LC running, this same wizard detects
+    your game window and calibrates against the real screen.
+  </div>
+  {% endif %}
+
+  <!-- STEP 1: MODEL TIER -->
+  <section class="wizard-step" data-step="1">
+    <h2>Choose a model tier</h2>
+    <p class="muted">You can change this later from the overlay's settings.</p>
+    <div class="tier-grid">
+      <label class="tier-card">
+        <input type="radio" name="tier" value="lite">
+        <div class="tier-card-inner">
+          <h3>Lite</h3>
+          <p>Fastest, lowest CPU. Bigger safety margins to compensate for a
+             coarser, quicker perception pass. Good for lower-end PCs.</p>
+        </div>
+      </label>
+      <label class="tier-card">
+        <input type="radio" name="tier" value="standard" checked>
+        <div class="tier-card-inner">
+          <h3>Standard</h3>
+          <p>The well-tested default: full lane keeping, adaptive cruise,
+             traffic-light and emergency-vehicle handling.</p>
+        </div>
+      </label>
+      <label class="tier-card">
+        <input type="radio" name="tier" value="pro">
+        <div class="tier-card-inner">
+          <h3>Pro</h3>
+          <p>Tighter following distance and snappier steering once you trust
+             it. Also where a model trained on your own driving plugs in.</p>
+        </div>
+      </label>
+    </div>
+    <div class="wizard-nav">
+      <span></span>
+      <button class="btn btn-primary" onclick="goStep(2)">Next</button>
+    </div>
+  </section>
+
+  <!-- STEP 2: LOCATE GAME WINDOW -->
+  <section class="wizard-step hidden" data-step="2">
+    <h2>Locate your ER:LC window</h2>
+    <p class="muted">Launch Roblox and join ER:LC first, then detect the window.
+       You can fine-tune the region manually if detection misses.</p>
+    <button class="btn btn-scenario" id="btnDetect">🔍 Detect Automatically</button>
+    <div id="detectNote" class="note"></div>
+    <div class="region-grid">
+      <label>Left <input type="number" id="regLeft" value="0"></label>
+      <label>Top <input type="number" id="regTop" value="0"></label>
+      <label>Width <input type="number" id="regWidth" value="1920"></label>
+      <label>Height <input type="number" id="regHeight" value="1080"></label>
+    </div>
+    <button class="btn" id="btnPreview1">🖼 Preview</button>
+    <div class="preview-frame">
+      <img id="previewImg1" alt="capture preview">
+    </div>
+    <div class="wizard-nav">
+      <button class="btn" onclick="goStep(1)">Back</button>
+      <button class="btn btn-primary" onclick="goStep(3)">Next</button>
+    </div>
+  </section>
+
+  <!-- STEP 3: CALIBRATE SPEEDOMETER -->
+  <section class="wizard-step hidden" data-step="3">
+    <h2>Calibrate the speed readout</h2>
+    <p class="muted">Drag the sliders so the box lines up over ER:LC's on-screen
+       speed display (default bottom-right). The autopilot reads this via OCR
+       since it has no other way to know your real speed.</p>
+    <button class="btn" id="btnPreview2">🖼 Refresh Preview</button>
+    <div class="preview-frame">
+      <img id="previewImg2" alt="capture preview">
+      <div class="roi-box" id="roiBox"></div>
+    </div>
+    <div class="roi-grid">
+      <label>Left % <input type="range" id="roiX1" min="0" max="100" value="86"></label>
+      <label>Top % <input type="range" id="roiY1" min="0" max="100" value="86"></label>
+      <label>Right % <input type="range" id="roiX2" min="0" max="100" value="99"></label>
+      <label>Bottom % <input type="range" id="roiY2" min="0" max="100" value="97"></label>
+    </div>
+    <div class="note" id="ocrNote"></div>
+    <div class="wizard-nav">
+      <button class="btn" onclick="goStep(2)">Back</button>
+      <button class="btn btn-primary" onclick="goStep(4)">Next</button>
+    </div>
+  </section>
+
+  <!-- STEP 4: CONTROLS + SAFETY -->
+  <section class="wizard-step hidden" data-step="4">
+    <h2>Controls &amp; safety</h2>
+    <p class="muted">The autopilot drives using the same keys you would:</p>
+    <table class="keys-table">
+      <tr><td class="key">W A S D</td><td>Drive (throttle / steer / brake)</td></tr>
+      <tr><td class="key">P</td><td>Parking brake</td></tr>
+      <tr><td class="key">Q</td><td>Left turn signal</td></tr>
+      <tr><td class="key">E</td><td>Right turn signal</td></tr>
+      <tr><td class="key">G</td><td>Hazards</td></tr>
+      <tr><td class="key">H</td><td>Horn</td></tr>
+      <tr><td class="key">F9</td><td>Kill switch — disengages instantly, from anywhere</td></tr>
+    </table>
+    <div class="banner banner-warn">
+      <b>Safety:</b> This drives your keyboard for you. Keep a hand near it,
+      watch the road, and expect it to make mistakes — it is not a
+      replacement for your attention. Press <b>F9</b> at any time to
+      instantly disengage, or click Disengage in the overlay. Using
+      automation in online games may violate that game's rules — that's on
+      you to check.
+    </div>
+    <label class="disclaimer-row">
+      <input type="checkbox" id="acceptDisclaimer">
+      I understand and accept this.
+    </label>
+    <div class="wizard-nav">
+      <button class="btn" onclick="goStep(3)">Back</button>
+      <button class="btn btn-primary" id="btnLaunch">🚗 Launch Autopilot</button>
+    </div>
+    <div class="note" id="launchNote"></div>
+  </section>
+</div>
+<script src="{{ url_for('static', filename='wizard.js') }}"></script>
+</body>
+</html>

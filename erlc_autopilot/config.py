@@ -60,10 +60,42 @@ class AutopilotConfig:
     min_lane_confidence_to_drive: float = 0.15
     disengage_after_lost_frames: int = 20  # ~1s @20fps with zero lane confidence -- fail safe, fast
 
+    # which "model tier" produced this config -- purely informational
+    # (the wizard sets it), but surfaced in telemetry/HUD so you can see
+    # which preset + detector backend is actually driving
+    model_tier: str = "standard"
+
     def to_dict(self):
         return asdict(self)
 
     def update(self, patch: dict):
         for k, v in patch.items():
-            if hasattr(self, k):
+            if hasattr(self, k) and k != "model_tier":
                 setattr(self, k, type(getattr(self, k))(v))
+
+    @classmethod
+    def for_tier(cls, tier: str) -> "AutopilotConfig":
+        """Setup-wizard model-tier presets. Real differences, not just a
+        label: Lite trades accuracy for raw speed on low-end PCs (bigger
+        safety margins to compensate for a coarser/faster perception
+        backend), Standard is the well-tested default, Pro tightens
+        everything up for a snappier, more assertive drive once you trust
+        it (and is where a future imitation-learned steering model would
+        get blended in on top of the rule-based stack)."""
+        cfg = cls()
+        cfg.model_tier = tier
+        if tier == "lite":
+            cfg.cruise_speed_mps = 11.0
+            cfg.follow_time_headway_s = 2.3
+            cfg.min_follow_gap_m = 8.0
+            cfg.pedestrian_emergency_distance_m = 18.0
+            cfg.emergency_vehicle_reaction_distance_m = 40.0
+            cfg.steer_kp = 1.15
+        elif tier == "pro":
+            cfg.cruise_speed_mps = 16.0
+            cfg.follow_time_headway_s = 1.4
+            cfg.min_follow_gap_m = 5.0
+            cfg.steer_kp = 1.5
+            cfg.steer_kd = 0.65
+        return cfg
+
