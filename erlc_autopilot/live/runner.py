@@ -43,12 +43,20 @@ class LiveRunner:
                  config: Optional[AutopilotConfig] = None,
                  speed_reader: Optional[SpeedReader] = None,
                  ground_truth_speed: Optional[Callable[[], float]] = None,
-                 arm_kill_switch: bool = True):
+                 arm_kill_switch: bool = True,
+                 advance_sim: Optional[Callable[["object", float], None]] = None):
         """`ground_truth_speed`, if given, is a zero-arg callable returning
         a real speed value -- only ever wired up in sim mode, where the
         simulator happens to know its own ground truth. In live mode this
         stays None and speed comes from `speed_reader` (OCR) instead,
         exactly like the real game would have to be driven.
+
+        `advance_sim`, if given, is called as `advance_sim(command, dt)`
+        once per tick -- this is how Sim Mode actually steps the bundled
+        simulator's physics forward using the command the pipeline just
+        produced (a real screen capture doesn't need this, the real game
+        simulates itself; a `SimFrameSource` does, since nothing else
+        would ever move the fake car).
         """
         self.frame_source = frame_source
         self.actuator = actuator
@@ -57,6 +65,7 @@ class LiveRunner:
         self.pipeline.object_detector = build_detector_for_tier(self.config.model_tier)
         self.speed_reader = speed_reader
         self._ground_truth_speed = ground_truth_speed
+        self._advance_sim = advance_sim
         self.state = RunnerState()
         self.lock = threading.Lock()
         self._running = False
@@ -146,6 +155,8 @@ class LiveRunner:
                 engaged = self._engaged
             cmd.engaged = cmd.engaged and engaged
             self.actuator.apply(cmd)
+            if self._advance_sim is not None:
+                self._advance_sim(cmd, dt)
 
             ok, buf = cv2.imencode(".jpg", result.debug_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             telemetry = {

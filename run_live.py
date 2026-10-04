@@ -1,133 +1,182 @@
 #!/usr/bin/env python3
-"""Launches the real ERLC Autopilot app: a first-run setup wizard, then a
-small always-on-top HUD overlay that drives actual ER:LC gameplay by
-reading your screen and sending real keyboard input.
+"""Drives ER:LC for you: captures your screen, drives with real keyboard
+input (W/A/S/D, P, Q/E, G, H). No web browser, no setup wizard -- just:
 
     python run_live.py
 
-On Windows with ER:LC running, this opens the setup wizard the first time
-(model tier, screen/speedometer calibration, key bindings + safety
-acknowledgement), then a small floating overlay while the autopilot
-drives. On any other platform (including this dev sandbox), it
-automatically falls back to Sim Mode -- the exact same wizard/overlay UI
-and control loop, but driving the bundled simulator instead of a real
-game, so you can see and test the whole app without Windows/Roblox.
+1. Launch Roblox, join ER:LC, get into a car.
+2. Run this script. On Windows it auto-detects the Roblox window (falls
+   back to your whole primary monitor if it can't find it -- still works
+   fine if Roblox is fullscreen/maximized). The region is remembered in
+   ~/.erlc_autopilot/calibration.json so this only has to happen once;
+   pass --recalibrate to redo it.
+3. It counts down a few seconds so you can switch back to the game, then
+   starts driving. Status prints live to this console, plus a small
+   always-on-top overlay window if `tkinter`/`Pillow` are available
+   (they ship with the standard python.org Windows installer).
+4. Press F9 at any time to instantly stop (kill switch), or Ctrl+C here.
 
-Opens in a native-feeling window via `pywebview` if installed; otherwise
-falls back to just starting the local web server and printing the URL to
-open in a normal browser (this is what happens in this sandbox, and is a
-perfectly fine way to run it on Windows too if you'd rather not install
-pywebview).
+On any OS other than Windows (e.g. a dev sandbox with no Roblox), this
+automatically drives the bundled simulator instead (Sim Mode) so the
+whole app can still be exercised without Windows/Roblox installed -- pass
+--sim to force this on Windows too.
 """
 from __future__ import annotations
 
 import argparse
-import os
 import platform
-import threading
+import sys
 import time
 
-from erlc_autopilot.live.ui_server import create_app
+from erlc_autopilot.config import AutopilotConfig
+from erlc_autopilot.live.calibration import Calibration
+from erlc_autopilot.live.capture import ScreenCaptureSource, SimFrameSource
+from erlc_autopilot.live.input_driver import KeyboardActuator
+from erlc_autopilot.live.runner import LiveRunner
+from erlc_autopilot.live.window_capture import WindowRegion, find_roblox_window, primary_screen_size
+from erlc_autopilot.perception.speed_reader import SpeedReader, SpeedReaderConfig
+
+IS_WINDOWS = platform.system() == "Windows"
 
 
-def _run_flask(app, port: int):
-    app.run(host="0.0.0.0", port=port, threaded=True, debug=False, use_reloader=False)
+def _auto_calibrate(cal: Calibration) -> Calibration:
+    print("Looking for the Roblox window...")
+    region = find_roblox_window()
+    if region is not None:
+        print(f"  found it: {region.width}x{region.height} at ({region.left},{region.top})")
+    else:
+        region = primary_screen_size()
+        if region is not None:
+            print(f"  couldn't find a 'Roblox' window -- using your primary monitor instead "
+                  f"({region.width}x{region.height}). Make sure ER:LC is running and visible.")
+        else:
+            region = WindowRegion(0, 0, 1920, 1080)
+            print("  couldn't detect anything -- defaulting to 1920x1080 at (0,0). "
+                  "Edit ~/.erlc_autopilot/calibration.json if that's wrong for your setup.")
+    cal.capture_left, cal.capture_top = region.left, region.top
+    cal.capture_width, cal.capture_height = region.width, region.height
+    cal.calibrated = True
+    cal.save()
+    return cal
+
+
+def _console_loop(runner: LiveRunner) -> None:
+    print("\nNo tkinter/Pillow overlay available -- printing status to this console instead.")
+    print("Press Ctrl+C to stop (or F9 from anywhere, including inside the game).\n")
+    try:
+        while True:
+            t = runner.get_telemetry()
+            if t:
+                evs = t.get("emergency_vehicles") or []
+                ev_flag = " [EV!]" if any(e.get("flashing") for e in evs) else ""
+                sig = f" signal={t.get('turn_signal')}" if t.get("turn_signal") else ""
+                line = (f"\rspeed={t.get('speed_mph', 0):5.1f}mph  "
+                        f"target={t.get('target_speed_mph', 0):5.1f}mph  "
+                        f"status={str(t.get('status', '--')):18s}  "
+                        f"engaged={t.get('engaged')!s:5s}{sig}{ev_flag}   ")
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        print("\nStopping...")
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8800)))
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--sim", action="store_true",
-                         help="Force Sim Mode even on Windows (drive the bundled "
-                              "simulator instead of a real screen capture).")
-    parser.add_argument("--no-window", action="store_true",
-                         help="Skip the pywebview native window and just run the "
-                              "local server (open the printed URL in your browser).")
+                         help="Force Sim Mode even on Windows (drive the bundled simulator).")
+    parser.add_argument("--tier", choices=["lite", "standard", "pro"], default=None,
+                         help="Model tier (default: remembered from last run, or 'standard').")
+    parser.add_argument("--recalibrate", action="store_true",
+                         help="Re-detect the capture region instead of reusing the saved one.")
+    parser.add_argument("--region", type=str, default=None,
+                         help="Manually set the capture region as left,top,width,height "
+                              "(skips auto-detection).")
+    parser.add_argument("--no-overlay", action="store_true",
+                         help="Skip the tkinter overlay window even if available; console only.")
+    parser.add_argument("--input-backend", choices=["auto", "pydirectinput", "pynput", "dry_run"],
+                         default=None, help="Override how keys are sent (default: remembered/auto).")
     args = parser.parse_args()
 
-    force_sim = args.sim or platform.system() != "Windows"
-    app = create_app(force_sim=force_sim)
+    force_sim = args.sim or not IS_WINDOWS
+    cal = Calibration.load()
+    if args.tier:
+        cal.model_tier = args.tier
+    if args.input_backend:
+        cal.input_backend = args.input_backend
 
-    server_thread = threading.Thread(target=_run_flask, args=(app, args.port), daemon=True)
-    server_thread.start()
-    time.sleep(0.6)  # let Flask bind before we try to load it in a window
+    print("=" * 60)
+    print(" ERLC AUTOPILOT")
+    print("=" * 60)
+    print("Controls it drives with: W A S D | P parking brake | Q/E turn")
+    print("signals | G hazards | H horn | F9 KILL SWITCH (works anywhere)")
+    print("This drives your keyboard for you -- keep a hand near it and")
+    print("watch the road. It will make mistakes.")
+    print("=" * 60)
 
-    url = f"http://127.0.0.1:{args.port}/"
     if force_sim:
-        print(f"[ERLC Autopilot] Sim Mode (no Windows/ER:LC detected) -- {url}")
+        print("Sim Mode: no Windows/ER:LC capture on this machine -- driving the")
+        print("bundled simulator instead so the app can still be exercised.")
+        frame_source = SimFrameSource()
+        actuator = KeyboardActuator(backend="dry_run")
+        speed_reader = None
+        ground_truth = lambda: frame_source.world.ego.speed
+        advance_sim = lambda cmd, dt: frame_source.world.update(dt, cmd.steer, cmd.throttle, cmd.brake)
     else:
-        print(f"[ERLC Autopilot] Live Mode -- {url}")
+        if args.region:
+            try:
+                l, t, w, h = (int(x) for x in args.region.split(","))
+                cal.capture_left, cal.capture_top, cal.capture_width, cal.capture_height = l, t, w, h
+                cal.calibrated = True
+                cal.save()
+            except ValueError:
+                print(f"Couldn't parse --region '{args.region}' as left,top,width,height; ignoring.")
+        if not cal.calibrated or args.recalibrate:
+            cal = _auto_calibrate(cal)
+        print(f"Capture region: {cal.capture_width}x{cal.capture_height} at "
+              f"({cal.capture_left},{cal.capture_top})  [--recalibrate to redo]")
+        region = WindowRegion(cal.capture_left, cal.capture_top, cal.capture_width, cal.capture_height)
+        frame_source = ScreenCaptureSource(region)
+        actuator = KeyboardActuator(backend=cal.input_backend)
+        speed_reader = SpeedReader(SpeedReaderConfig(roi=list(cal.speed_roi)))
+        if not speed_reader.available():
+            print("Note: Tesseract OCR not found -- speed will be an estimate, not a real "
+                  "reading. See requirements.txt for how to install it.")
+        ground_truth = None
+        advance_sim = None
 
-    if not args.no_window:
+    config = AutopilotConfig.for_tier(cal.model_tier)
+    runner = LiveRunner(frame_source, actuator, config=config,
+                         speed_reader=speed_reader, ground_truth_speed=ground_truth,
+                         advance_sim=advance_sim)
+    if not force_sim:
+        print(f"Model tier: {cal.model_tier}  |  input backend: {cal.input_backend}")
+        for i in range(3, 0, -1):
+            print(f"Starting in {i}... (switch to the ER:LC window now)")
+            time.sleep(1)
+
+    runner.start()
+    if not runner.kill_switch or not runner.kill_switch.armed:
+        print("Note: global F9 kill switch isn't armed (the 'keyboard' package may be "
+              "missing, or needs admin on this machine) -- use Ctrl+C or the overlay's "
+              "kill switch button instead.")
+
+    overlay_shown = False
+    if not args.no_overlay:
         try:
-            import webview  # pywebview
-
-            window = webview.create_window("ERLC Autopilot", url, width=760, height=760)
-            _watch_for_overlay(window, url)
-            # Prefer a modern Chromium-based renderer explicitly. Without
-            # this, pywebview's auto-detection can silently fall back to
-            # the legacy Internet-Explorer-based "mshtml" engine on
-            # Windows machines where the Edge WebView2 Runtime isn't
-            # registered for this Python process -- that engine has no
-            # fetch()/arrow-functions/async-await, which makes every
-            # button in the UI silently do nothing (the JS errors out
-            # before it can even attach the click handlers). The UI's own
-            # JS is now written to tolerate that engine too (see
-            # live/static/*.js), but getting a real modern renderer is
-            # strictly better, so try for one first.
-            try:
-                webview.start(gui="edgechromium")
-            except Exception:
-                webview.start()
-            return
+            from erlc_autopilot.live.tk_overlay import run_overlay
+            overlay_shown = True
+            run_overlay(runner)  # blocks until the window is closed
+        except ImportError as exc:
+            print(f"(No overlay window: {exc})")
         except Exception as exc:
-            print(f"[ERLC Autopilot] Native window unavailable ({exc}); "
-                  f"open {url} in your browser instead.")
+            print(f"(Overlay window failed to start: {exc})")
 
-    print(f"[ERLC Autopilot] Open {url} in your browser. Press Ctrl+C to quit.")
-    print("[ERLC Autopilot] If buttons don't respond in the native window next "
-          "time, install the Microsoft Edge WebView2 Runtime, or just keep "
-          "using --no-window + a normal browser tab -- functionally identical.")
-    try:
-        while True:
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        pass
+    if not overlay_shown:
+        _console_loop(runner)
 
-
-def _watch_for_overlay(window, base_url: str):
-    """Once setup finishes, shrink the window from the full wizard size
-    down to something that actually looks like the small HUD overlay it's
-    now showing, instead of leaving a large mostly-blank window. Purely
-    cosmetic and best-effort -- older pywebview versions without
-    resize()/move() just keep the original window size."""
-    import threading
-    import urllib.request
-
-    def _poll():
-        resized = False
-        while True:
-            time.sleep(1.5)
-            if resized:
-                continue
-            try:
-                with urllib.request.urlopen(base_url + "api/telemetry", timeout=2) as resp:
-                    import json
-                    data = json.loads(resp.read().decode("utf-8"))
-                if data.get("status") not in (None, "not_started"):
-                    try:
-                        window.resize(340, 520)
-                    except Exception:
-                        pass
-                    try:
-                        window.move(40, 40)
-                    except Exception:
-                        pass
-                    resized = True
-            except Exception:
-                pass
-
-    threading.Thread(target=_poll, daemon=True).start()
+    runner.stop()
+    print("Stopped.")
 
 
 if __name__ == "__main__":

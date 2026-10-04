@@ -13,8 +13,12 @@ joblib>=1.3
 pydirectinput>=1.0.4; sys_platform == "win32"   # real key injection Roblox actually registers
 pywin32>=306; sys_platform == "win32"           # finds the Roblox window for auto-calibration
 keyboard>=0.13.5; sys_platform == "win32"       # global F9 kill switch (works even without window focus)
-pywebview>=4.4                                  # native-feeling wizard/overlay window (optional --
-                                                 # falls back to "open this URL in your browser" without it)
+
+# --- optional: native status overlay window (NOT a browser) ---
+# tkinter and Pillow ship with the standard python.org Windows installer,
+# so there's usually nothing extra to install here. If they're missing,
+# run_live.py automatically falls back to plain console status output --
+# the autopilot itself is unaffected either way.
 
 # --- optional: real speed reading via OCR of the in-game speedometer ---
 # Without this, the live app falls back to a rough dead-reckoning speed

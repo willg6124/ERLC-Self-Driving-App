@@ -9,9 +9,10 @@ a game instead of a real car.
 
 It ships with two things:
 
-1. **The real app** (`run_live.py`) — a setup wizard + small HUD overlay
-   that captures your actual screen and drives actual ER:LC gameplay on
-   your Windows PC.
+1. **The real app** (`run_live.py`) — a zero-config console app (plus an
+   optional small always-on-top status window, *not* a browser) that
+   captures your actual screen and drives actual ER:LC gameplay on your
+   Windows PC. No web pages, no embedded browser — just run it.
 2. **A bundled simulator + dashboard** (`run_dashboard.py`) — a
    procedural fake ER:LC used as a test harness, so the whole perception
    and driving-policy stack can be built, tuned, and safety-tested without
@@ -28,8 +29,8 @@ pip install -r requirements.txt
 **Try it without ER:LC first** (works on any OS):
 
 ```
-python run_dashboard.py          # in-browser simulator + live tuning dashboard
-python run_live.py --sim         # the *real* app's wizard/overlay UI, driving the simulator
+python run_dashboard.py          # in-browser simulator + live tuning dashboard (dev tool only)
+python run_live.py --sim         # the *real* app, driving the bundled simulator instead of ER:LC
 ```
 
 **Drive real ER:LC** (Windows only):
@@ -38,25 +39,29 @@ python run_live.py --sim         # the *real* app's wizard/overlay UI, driving t
 python run_live.py
 ```
 
-1. Launch Roblox, join ER:LC, get into a car.
-2. Run `python run_live.py`. It opens the setup wizard (a normal browser
-   tab unless you've installed `pywebview`, in which case it's its own
-   small window).
-3. Pick a **model tier** (Lite / Standard / Pro — see below).
-4. Click **Detect Automatically** to find the Roblox window, or enter the
-   capture region manually. Click Preview to confirm you're actually
-   seeing the game.
-5. Line the calibration box up over your in-game speed readout (bottom
-   right by default) — this is read via OCR each frame since there's no
-   other way for the app to know your real speed.
-6. Read the key bindings and safety disclaimer, check the box, hit
-   **Launch Autopilot**.
-7. The overlay appears: mini camera preview, speed/target speed, status,
-   Disengage/Honk/Hazards buttons. The car starts driving itself.
+That's it — no setup wizard, no web page to click through. On first run:
 
-Only runs the wizard once — your calibration is saved to
-`~/.erlc_autopilot/calibration.json`. Click the ⚙ in the overlay to redo
-it (e.g. after changing resolution).
+1. Launch Roblox, join ER:LC, get into a car.
+2. Run `python run_live.py`. It auto-detects the Roblox window (falls back
+   to your whole primary monitor if it can't find one — still fine if
+   Roblox is fullscreen/maximized), picks the **Standard** model tier by
+   default, counts down 3 seconds so you can switch back to the game, and
+   starts driving. Status prints live in the console: speed, target
+   speed, status, engagement, turn signal, any emergency-vehicle alert.
+3. If `tkinter`/`Pillow` are available (they ship with the standard
+   python.org Windows installer, so usually nothing extra to install),
+   a small always-on-top native window also appears with a mini camera
+   preview and Engage/Disengage/Honk/Hazards buttons. This is a plain
+   Tkinter window, not a browser — if it can't load for any reason the
+   app automatically keeps running with console-only output instead.
+4. Press **F9** any time to instantly stop (kill switch) — or Ctrl+C in
+   the console, or the overlay's kill switch button.
+
+Useful flags: `--tier lite|standard|pro`, `--recalibrate` (re-detect the
+window instead of reusing the saved region), `--region L,T,W,H` (set the
+capture region manually), `--no-overlay` (console only). The detected
+capture region is remembered in `~/.erlc_autopilot/calibration.json` so
+auto-detection only has to run once.
 
 ## Controls
 
@@ -77,7 +82,7 @@ just pressing keys:
 
 This drives your keyboard for you. It will make mistakes. Keep a hand
 near the keyboard and your eyes on the screen; it is driver assistance,
-not a replacement for supervision. Hit **F9** or the overlay's
+not a replacement for supervision. Hit **F9**, Ctrl+C, or the overlay's
 **Disengage** button any time something looks wrong. It also
 auto-disengages on its own if it loses the lane for about a second
 (`disengage_after_lost_frames` in config) rather than continuing to
@@ -166,7 +171,7 @@ what the learned model does).
 
 ```
 python run_dashboard.py     # tune the CV/control stack against the simulator
-python run_live.py --sim    # test the real wizard/overlay app end-to-end against the simulator
+python run_live.py --sim    # run the real app end-to-end, driving the bundled simulator
 ```
 
 Both run entirely offline with no game required, which is how this whole
@@ -184,6 +189,10 @@ Windows or Roblox.
   `~/.erlc_autopilot/calibration.json`).
 - Speed OCR requires installing the Tesseract binary separately; without
   it, speed is a rough estimate, not a measurement.
-- The wizard/overlay UI is an in-house redesign in the same visual
-  language as the bundled dashboard, not a pixel-for-pixel clone of any
-  particular reference video/screenshot.
+- The optional Tkinter status window has not been exercised on a real
+  Windows machine by the author (this project is built/tested in a Linux
+  sandbox where `tkinter` isn't installable) — it's written carefully and
+  kept strictly optional specifically for that reason: if it ever fails
+  to open or crashes, `run_live.py` catches it and keeps driving with
+  plain console output, so the autopilot itself is never blocked by it.
+  Pass `--no-overlay` to skip it outright.
