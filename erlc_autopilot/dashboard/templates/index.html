@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ERLC Autopilot — Live Dashboard</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="dot"></span>
+    <h1>ERLC Self-Driving Autopilot</h1>
+    <span class="tag">computer-vision lane keeping &middot; adaptive cruise &middot; traffic-light &amp; pedestrian safety</span>
+  </div>
+  <div class="status-pill" id="statusPill">CONNECTING…</div>
+</header>
+
+<main>
+  <section class="video-panel">
+    <div class="video-frame">
+      <img id="videoFeed" src="/video_feed" alt="live autopilot camera feed">
+      <div class="video-badge" id="engagedBadge">ENGAGED</div>
+      <div class="video-hud">
+        <div class="hud-item"><span class="hud-label">SPEED</span><span class="hud-value" id="hudSpeed">0</span><span class="hud-unit">mph</span></div>
+        <div class="hud-item"><span class="hud-label">TARGET</span><span class="hud-value" id="hudTarget">0</span><span class="hud-unit">mph</span></div>
+        <div class="hud-item"><span class="hud-label">FPS</span><span class="hud-value" id="hudFps">0</span></div>
+      </div>
+    </div>
+    <div class="controls">
+      <button id="btnToggle" class="btn btn-primary">⏸ Disengage</button>
+      <button id="btnReset" class="btn">↻ New Drive</button>
+      <button id="btnPedestrian" class="btn btn-scenario">🚶 Spawn Pedestrian</button>
+      <button id="btnCutin" class="btn btn-scenario">🚗 Car Cut-In</button>
+      <button id="btnRedLight" class="btn btn-scenario">🚦 Force Red Light</button>
+      <button id="btnEvParked" class="btn btn-scenario btn-ev">🚓 Parked Police (Move Over)</button>
+      <button id="btnEvFire" class="btn btn-scenario btn-ev">🚒 Fire Truck Overtaking</button>
+      <button id="btnEvEms" class="btn btn-scenario btn-ev">🚑 Ambulance Overtaking</button>
+    </div>
+  </section>
+
+  <section class="side-panel">
+    <div class="card">
+      <h2>Vehicle State</h2>
+      <div class="gauges">
+        <div class="gauge">
+          <div class="gauge-label">Steering</div>
+          <div class="wheel-wrap"><div class="wheel" id="wheel"></div></div>
+          <div class="gauge-value" id="steerValue">0.00</div>
+        </div>
+        <div class="gauge">
+          <div class="gauge-label">Throttle</div>
+          <div class="bar"><div class="bar-fill throttle" id="throttleBar"></div></div>
+          <div class="gauge-value" id="throttleValue">0%</div>
+        </div>
+        <div class="gauge">
+          <div class="gauge-label">Brake</div>
+          <div class="bar"><div class="bar-fill brake" id="brakeBar"></div></div>
+          <div class="gauge-value" id="brakeValue">0%</div>
+        </div>
+      </div>
+      <div class="kv-grid">
+        <div><span>Status</span><b id="kvStatus">—</b></div>
+        <div><span>Lane confidence</span><b id="kvConfidence">—</b></div>
+        <div><span>Lane offset</span><b id="kvOffset">—</b></div>
+        <div><span>Nearest light</span><b id="kvLight">—</b></div>
+        <div><span>Vehicles ahead</span><b id="kvVehicles">—</b></div>
+        <div><span>Pedestrians ahead</span><b id="kvPeds">—</b></div>
+        <div><span>Emergency vehicle</span><b id="kvEv">—</b></div>
+        <div><span>Turn signal</span><b id="kvSignal">—</b></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Session Stats</h2>
+      <div class="kv-grid">
+        <div><span>Distance driven</span><b id="statDistance">—</b></div>
+        <div><span>Time engaged</span><b id="statEngaged">—</b></div>
+        <div><span>Top speed</span><b id="statTopSpeed">—</b></div>
+        <div><span>Lights obeyed</span><b id="statLights">—</b></div>
+        <div><span>Emergency brakes</span><b id="statEmergency">—</b></div>
+        <div><span>Collisions</span><b id="statCollisions">—</b></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Tuning</h2>
+      <div class="tuning-row">
+        <label>Cruise speed <span id="cruiseVal"></span> mph</label>
+        <input type="range" id="cruiseSpeed" min="4" max="35" step="1">
+      </div>
+      <div class="tuning-row">
+        <label>Steering aggressiveness <span id="kpVal"></span></label>
+        <input type="range" id="steerKp" min="0.3" max="3.0" step="0.05">
+      </div>
+      <div class="tuning-row">
+        <label>Follow distance <span id="headwayVal"></span> s</label>
+        <input type="range" id="headway" min="0.8" max="3.5" step="0.1">
+      </div>
+    </div>
+
+    <div class="card events-card">
+      <h2>Event Log</h2>
+      <ul id="eventList" class="events"></ul>
+    </div>
+  </section>
+</main>
+
+<footer>
+  Built as an educational computer-vision / control-systems demo. Runs entirely in-browser against a
+  self-contained simulator here; see README for wiring it up to a real screen capture of ER:LC.
+</footer>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

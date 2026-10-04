@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+logs/
+models/*.caffemodel
+models/*.prototxt
+*.jpg
+*.jpeg
+*.png
+!docs/screenshots/*.jpg
+!docs/screenshots/*.png
+.DS_Store
