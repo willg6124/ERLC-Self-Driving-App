@@ -96,7 +96,7 @@ those are; this project doesn't check for you.
 |------|-------------------|
 | **Lite** | Forces the lightweight heuristic detector (no neural net) and widens every safety margin to compensate — lowest CPU use, best for weaker PCs. |
 | **Standard** | The default. Real MobileNet-SSD object detection if the weight files are present (see `models/README.md`), heuristic fallback otherwise. |
-| **Pro** | Tighter follow distance, snappier steering gains for a more assertive drive once you trust it. Also the tier a future model trained on *your own* recorded driving would plug into. |
+| **Pro** | Tighter follow distance, snappier steering gains, more lookahead weight for a more assertive drive once you trust it. Also the only tier that blends in a model trained on *your own* recorded driving, if you've trained one (see "Training your own driving" below) — purely rule-based otherwise. |
 
 ## How it actually works
 
@@ -119,10 +119,19 @@ screen capture  ─┐                                   ┌─ keyboard (W A S 
 ```
 
 - **Lane keeping**: classical CV (HSV threshold + edge/contour fit for lane
-  lines), PID steering control.
+  lines), PID steering control blended with a second, farther-ahead
+  "lookahead" offset taken near the top of the detected lane lines
+  (pure-pursuit-style) — anticipates where the road is actually headed
+  instead of only correcting for where it already drifted, which cuts
+  down on oscillation/curve-cutting versus near-offset-only PID.
 - **Object detection**: a dependency-light HSV/contour heuristic by
   default; drops in a real MobileNet-SSD (`cv2.dnn`) automatically if you
   add weight files under `models/` (see `models/README.md`).
+- **Adaptive cruise**: reacts to *time-to-collision*, not just raw gap —
+  it estimates how fast the gap to the car ahead is actually shrinking
+  frame-to-frame and starts easing off early if that implies contact soon,
+  the same anticipation a real radar-based ACC gets for free, catching a
+  sudden cut-in or hard-braking lead car earlier than distance alone would.
 - **Traffic lights**: color-region detection + distance estimation from
   apparent size, with short-term memory so a real stop commitment doesn't
   evaporate just because the signal scrolls out of frame on final approach.
@@ -130,8 +139,21 @@ screen capture  ─┐                                   ┌─ keyboard (W A S 
   for a flashing red+blue light-bar signature (confirmed over a few
   frames, not a single lucky one) to catch police/fire/EMS regardless of
   how the coarse shape heuristic classified the box. On a confirmed
-  sighting, the car slows to a crawl and leans away from whichever side
-  the lights are on — "pull over for police, move over for fire/EMS."
+  sighting the car leans away and slows, proportional to how close it is —
+  and once it's genuinely close (actually overtaking, or already reached
+  one parked ahead) it pulls fully onto the shoulder lean and comes to a
+  complete stop, not just a slow crawl past it, until the vehicle's clearly
+  moved away again — literally "pull over for police, move over for
+  fire/EMS," not just slow down near them.
+- **Imitation learning (optional, Pro tier)**: `run_live.py --record` logs
+  perception features alongside the WASD keys you actually press while you
+  drive manually; `train_model.py` fits a small scikit-learn model on top
+  of that; if a trained model exists, the Pro tier blends its steering
+  suggestion in on top of the rule-based PID/lookahead output (see
+  "Training your own driving" below). Throttle/brake and every safety
+  behavior (e-braking, red lights, EV yield/stop, disengage) stay 100%
+  rule-based regardless — a learned model can only ever nudge *how* it
+  steers, never override *why* it slows or stops.
 - **Speed**: the simulator can hand the pipeline its own ground truth;
   real gameplay can't, so `erlc_autopilot/perception/speed_reader.py` OCRs
   the in-game speedometer (needs the Tesseract binary installed — see
@@ -158,14 +180,40 @@ Every gain/threshold lives in `erlc_autopilot/config.py`
 
 ## Training your own driving (imitation learning)
 
-Not built yet. The planned approach: record your own ER:LC driving
-(frame + the keys you actually pressed) via the same capture pipeline,
-then train a small scikit-learn model mapping perception features (lane
-offset/curvature, nearby object distances) to steering/throttle, and blend
-it in at the **Pro** tier on top of the existing rule-based policy rather
-than replacing it outright (so the safety behaviors — e-braking,
-red-light compliance, EV yielding — stay rule-guaranteed regardless of
-what the learned model does).
+```
+python run_live.py --record recordings/session1.csv   # drive manually, it just watches + logs
+python train_model.py                                   # trains on every recordings/*.csv
+python run_live.py --tier pro                            # now blended into the Pro tier
+```
+
+1. `--record` runs the exact same perception stack (lane/object/traffic
+   light/EV detection) as normal driving, but sends no input at all —
+   you drive, it logs a feature snapshot (lane offset/curvature, nearest
+   vehicle/pedestrian distance, light state, EV activity, speed) paired
+   with whatever WASD keys you're actually holding, once per tick, to a
+   CSV. Drive a variety of roads/traffic for a few minutes for anything
+   useful to come out of it; Ctrl+C when done.
+2. `train_model.py` loads every `recordings/*.csv` (or `--data` a specific
+   glob/file) and fits a small `RandomForestRegressor` mapping those
+   features to (steer, throttle, brake), reporting held-out accuracy, and
+   saves it to `models/imitation_model.joblib`.
+3. Only the **Pro** tier ever loads and uses it (`AutopilotConfig.imitation
+   _blend_weight`, default 0.35) — and even then, only to nudge the
+   rule-based *steering* output partway toward what the model learned you'd
+   do. Throttle/brake and every safety behavior (e-braking, red-light
+   compliance, EV yielding/stopping, disengage) stay entirely rule-based
+   and are applied after the blend, exactly as before — a learned model can
+   change how assertively/smoothly it steers, never whether it stops for
+   something that matters.
+
+This whole pipeline (recording → training → blended inference) is
+exercised in this repo's own tests by using the rule-based policy itself
+as a stand-in "demonstrator" (since there's no real human/keyboard in a
+CI sandbox) — the actual `--record` capture step reads your literal
+keyboard state via the same `keyboard` package the F9 kill switch uses, so
+it's Windows-specific and, like a few other OS-level pieces of this
+project, not independently verified by me outside that stand-in; report
+back if it behaves unexpectedly on your machine.
 
 ## Development / testing without Roblox
 
@@ -189,6 +237,12 @@ Windows or Roblox.
   `~/.erlc_autopilot/calibration.json`).
 - Speed OCR requires installing the Tesseract binary separately; without
   it, speed is a rough estimate, not a measurement.
+- `--record`'s keyboard-state capture (what labels the imitation-learning
+  dataset) is Windows-specific for the same reason the F9 kill switch is;
+  it's checked up front and fails with a clear message instead of
+  silently recording garbage if it's not available, but hasn't been run
+  against a real human/keyboard by the author (see "Training your own
+  driving" above for how the rest of that pipeline was verified instead).
 - The optional Tkinter status window has not been exercised on a real
   Windows machine by the author (this project is built/tested in a Linux
   sandbox where `tkinter` isn't installable) — it's written carefully and

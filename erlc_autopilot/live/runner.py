@@ -16,6 +16,7 @@ from typing import Callable, Optional
 import cv2
 
 from ..config import AutopilotConfig
+from ..control.imitation import build_imitation_model_for_tier
 from ..pipeline import AutopilotPipeline
 from ..perception.speed_reader import SpeedReader
 from .input_driver import KeyboardActuator
@@ -63,6 +64,7 @@ class LiveRunner:
         self.config = config or AutopilotConfig()
         self.pipeline = AutopilotPipeline(self.config)
         self.pipeline.object_detector = build_detector_for_tier(self.config.model_tier)
+        self.pipeline.policy.imitation_model = build_imitation_model_for_tier(self.config.model_tier)
         self.speed_reader = speed_reader
         self._ground_truth_speed = ground_truth_speed
         self._advance_sim = advance_sim

@@ -4,6 +4,8 @@ __pycache__/
 logs/
 models/*.caffemodel
 models/*.prototxt
+models/imitation_model.joblib
+recordings/
 *.jpg
 *.jpeg
 *.png

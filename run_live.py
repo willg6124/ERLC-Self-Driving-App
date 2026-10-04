@@ -32,6 +32,7 @@ from erlc_autopilot.config import AutopilotConfig
 from erlc_autopilot.live.calibration import Calibration
 from erlc_autopilot.live.capture import ScreenCaptureSource, SimFrameSource
 from erlc_autopilot.live.input_driver import KeyboardActuator
+from erlc_autopilot.live.record_runner import RecordRunner
 from erlc_autopilot.live.runner import LiveRunner
 from erlc_autopilot.live.window_capture import WindowRegion, find_roblox_window, primary_screen_size
 from erlc_autopilot.perception.speed_reader import SpeedReader, SpeedReaderConfig
@@ -58,6 +59,56 @@ def _auto_calibrate(cal: Calibration) -> Calibration:
     cal.calibrated = True
     cal.save()
     return cal
+
+
+def _build_capture(args, cal: Calibration, force_sim: bool):
+    """Shared by normal driving and --record mode: sets up the frame
+    source (+ speed signal + sim-physics hook, where applicable) for
+    either Sim Mode or a real screen capture, so both modes auto-detect
+    the capture region/behave identically rather than duplicating it."""
+    if force_sim:
+        frame_source = SimFrameSource()
+        speed_fn = lambda: frame_source.world.ego.speed
+        advance_sim = lambda cmd, dt: frame_source.world.update(dt, cmd.steer, cmd.throttle, cmd.brake)
+        return frame_source, None, speed_fn, advance_sim
+
+    if args.region:
+        try:
+            l, t, w, h = (int(x) for x in args.region.split(","))
+            cal.capture_left, cal.capture_top, cal.capture_width, cal.capture_height = l, t, w, h
+            cal.calibrated = True
+            cal.save()
+        except ValueError:
+            print(f"Couldn't parse --region '{args.region}' as left,top,width,height; ignoring.")
+    if not cal.calibrated or args.recalibrate:
+        cal = _auto_calibrate(cal)
+    print(f"Capture region: {cal.capture_width}x{cal.capture_height} at "
+          f"({cal.capture_left},{cal.capture_top})  [--recalibrate to redo]")
+    region = WindowRegion(cal.capture_left, cal.capture_top, cal.capture_width, cal.capture_height)
+    frame_source = ScreenCaptureSource(region)
+    speed_reader = SpeedReader(SpeedReaderConfig(roi=list(cal.speed_roi)))
+    if not speed_reader.available():
+        print("Note: Tesseract OCR not found -- speed will be an estimate, not a real "
+              "reading. See requirements.txt for how to install it.")
+    return frame_source, speed_reader, None, None
+
+
+def _record_loop(runner: RecordRunner) -> None:
+    print("\nRecording -- drive manually in the game (or simulator) right now.")
+    print("Every WASD key you actually press is being logged alongside what the")
+    print("perception stack sees, for train_model.py to learn from afterwards.")
+    print("Press Ctrl+C here when you're done with this session.\n")
+    try:
+        while True:
+            if not runner.is_alive():
+                print(f"\n[recorder] stopped unexpectedly"
+                      f"{': ' + runner.error if runner.error else ''}. Exiting.")
+                return
+            sys.stdout.write(f"\rframes logged: {runner.frames_logged}   ")
+            sys.stdout.flush()
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        print("\nStopping recording...")
 
 
 def _console_loop(runner: LiveRunner) -> None:
@@ -113,6 +164,11 @@ def main():
                          help="Skip the tkinter overlay window even if available; console only.")
     parser.add_argument("--input-backend", choices=["auto", "pydirectinput", "pynput", "dry_run"],
                          default=None, help="Override how keys are sent (default: remembered/auto).")
+    parser.add_argument("--record", type=str, default=None, metavar="PATH",
+                         help="Record YOUR driving instead of autopiloting: logs perception "
+                              "features + the WASD keys you actually press to a CSV at PATH "
+                              "(sends no synthetic input at all). Train on it afterwards with "
+                              "train_model.py, then run with --tier pro to use it.")
     args = parser.parse_args()
 
     force_sim = args.sim or not IS_WINDOWS
@@ -125,43 +181,35 @@ def main():
     print("=" * 60)
     print(" ERLC AUTOPILOT")
     print("=" * 60)
-    print("Controls it drives with: W A S D | P parking brake | Q/E turn")
-    print("signals | G hazards | H horn | F9 KILL SWITCH (works anywhere)")
-    print("This drives your keyboard for you -- keep a hand near it and")
-    print("watch the road. It will make mistakes.")
+    if args.record:
+        print("RECORDING MODE -- you drive, it only watches and logs.")
+    else:
+        print("Controls it drives with: W A S D | P parking brake | Q/E turn")
+        print("signals | G hazards | H horn | F9 KILL SWITCH (works anywhere)")
+        print("This drives your keyboard for you -- keep a hand near it and")
+        print("watch the road. It will make mistakes.")
     print("=" * 60)
 
-    if force_sim:
+    if force_sim and not args.record:
         print("Sim Mode: no Windows/ER:LC capture on this machine -- driving the")
         print("bundled simulator instead so the app can still be exercised.")
-        frame_source = SimFrameSource()
-        actuator = KeyboardActuator(backend="dry_run")
-        speed_reader = None
-        ground_truth = lambda: frame_source.world.ego.speed
-        advance_sim = lambda cmd, dt: frame_source.world.update(dt, cmd.steer, cmd.throttle, cmd.brake)
-    else:
-        if args.region:
-            try:
-                l, t, w, h = (int(x) for x in args.region.split(","))
-                cal.capture_left, cal.capture_top, cal.capture_width, cal.capture_height = l, t, w, h
-                cal.calibrated = True
-                cal.save()
-            except ValueError:
-                print(f"Couldn't parse --region '{args.region}' as left,top,width,height; ignoring.")
-        if not cal.calibrated or args.recalibrate:
-            cal = _auto_calibrate(cal)
-        print(f"Capture region: {cal.capture_width}x{cal.capture_height} at "
-              f"({cal.capture_left},{cal.capture_top})  [--recalibrate to redo]")
-        region = WindowRegion(cal.capture_left, cal.capture_top, cal.capture_width, cal.capture_height)
-        frame_source = ScreenCaptureSource(region)
-        actuator = KeyboardActuator(backend=cal.input_backend)
-        speed_reader = SpeedReader(SpeedReaderConfig(roi=list(cal.speed_roi)))
-        if not speed_reader.available():
-            print("Note: Tesseract OCR not found -- speed will be an estimate, not a real "
-                  "reading. See requirements.txt for how to install it.")
-        ground_truth = None
-        advance_sim = None
 
+    frame_source, speed_reader, ground_truth, advance_sim = _build_capture(args, cal, force_sim)
+
+    if args.record:
+        recorder = RecordRunner(frame_source, args.record, speed_fn=ground_truth)
+        try:
+            recorder.start()
+        except RuntimeError as exc:
+            print(f"\nCan't start recording: {exc}")
+            sys.exit(1)
+        _record_loop(recorder)
+        recorder.stop()
+        print(f"Saved {recorder.frames_logged} frames to {args.record}.")
+        print(f"Train on it with:  python train_model.py --data {args.record!r}")
+        return
+
+    actuator = KeyboardActuator(backend="dry_run" if force_sim else cal.input_backend)
     config = AutopilotConfig.for_tier(cal.model_tier)
     runner = LiveRunner(frame_source, actuator, config=config,
                          speed_reader=speed_reader, ground_truth_speed=ground_truth,

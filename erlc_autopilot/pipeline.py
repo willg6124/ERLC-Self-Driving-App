@@ -50,6 +50,20 @@ class AutopilotPipeline:
         self.config = config
         self.policy.apply_config(config)
 
+    def perceive_only(self, frame: "np.ndarray"):
+        """Runs just the perception stack (lane/object/light/EV detection)
+        without the driving policy -- used by the recorder (`erlc_autopilot
+        /live/record_runner.py`) while you drive manually, so the features
+        it logs come from exactly the same detectors (same instances, same
+        internal smoothing/memory state) that would be driving the car,
+        without needing to also compute (and discard) a Command every tick.
+        Returns (lane, detections, light, ev_signals)."""
+        lane = self.lane_detector.process(frame)
+        detections = self.object_detector.detect(frame)
+        light = self.light_detector.detect(frame)
+        ev_signals = self.ev_detector.detect(frame, detections)
+        return lane, detections, light, ev_signals
+
     def tick(self, frame: "np.ndarray", speed_mps: float, dt: float) -> TickResult:
         now = time.time()
         lane = self.lane_detector.process(frame)

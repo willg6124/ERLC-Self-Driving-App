@@ -15,6 +15,7 @@ from ..perception.emergency_vehicle import EmergencyVehicleSignal
 from ..perception.lane_detection import LaneResult
 from ..perception.object_detection import Detection
 from ..perception.traffic_light import TrafficLightDetection
+from ..training.features import extract_features
 from .pid import PID
 
 FRAME_CENTER_X = 480.0  # half of the standard 960px-wide capture/sim frame
@@ -46,6 +47,18 @@ class DrivingPolicy:
         self._blind_light_timer = 0.0  # seconds spent stopped with no fresh
         # re-detection of a remembered red/yellow light -- caps how long we
         # wait before cautiously proceeding (see max_blind_light_stop_s)
+        self._last_lead_distance: Optional[float] = None  # for closing-speed/TTC estimation
+        self._ev_committed_stop = False  # true once we've actually pulled
+        # over and stopped for a close emergency vehicle, held with
+        # hysteresis until it's clearly moved away (see
+        # emergency_vehicle_stop_distance_m / ..._resume_distance_m)
+        # Optional learned steering model (see erlc_autopilot/control/imitation.py
+        # and train_model.py) -- None unless the Pro tier found a trained
+        # models/imitation_model.joblib on disk. Only ever nudges the
+        # rule-based steer output by `imitation_blend_weight`; every safety
+        # behavior below (e-braking, red lights, EV yield, disengage) stays
+        # fully rule-based and is applied after this blend, same as today.
+        self.imitation_model = None
 
     def _build_pids(self):
         c = self.cfg
@@ -65,6 +78,8 @@ class DrivingPolicy:
             self.speed_pid.reset()
             self._remembered_light = None
             self._blind_light_timer = 0.0
+            self._last_lead_distance = None
+            self._ev_committed_stop = False
 
     def _resolve_light(self, light: Optional[TrafficLightDetection], speed_mps: float,
                         dt: float, events: List[str]) -> Optional[TrafficLightDetection]:
@@ -131,25 +146,70 @@ class DrivingPolicy:
 
     def _handle_emergency_vehicles(self, ev_signals: List[EmergencyVehicleSignal],
                                     events: List[str]):
-        """"Move Over Law" response: for the nearest confirmed active light
-        bar within reaction distance, lean the lane-keeping target away from
-        whichever side of the frame it's on and cap speed to a cautious
-        crawl, whether it's overtaking from behind or already stopped on
-        the shoulder ahead. Returns (steer_bias, turn_signal, speed_cap).
+        """"Move Over Law" response, proportional to proximity rather than a
+        single fixed crawl speed: lean progressively harder away from
+        whichever side the active light bar is on as it gets closer, and
+        once it's genuinely close (actually overtaking, or we've reached a
+        parked one ahead) pull fully onto the shoulder lean and come to a
+        complete stop -- not just a slow crawl past it -- until it's
+        clearly moved away again. Returns (steer_bias, turn_signal, speed_cap).
         """
         c = self.cfg
         active = [e for e in ev_signals if e.flashing and e.distance_m < c.emergency_vehicle_reaction_distance_m]
         if not active:
+            if self._ev_committed_stop:
+                events.append("emergency_vehicle: clear, resuming normal driving")
+            self._ev_committed_stop = False
             return 0.0, None, None
+
         nearest = min(active, key=lambda e: e.distance_m)
         cx = (nearest.bbox[0] + nearest.bbox[2]) / 2.0
-        if cx < FRAME_CENTER_X:
-            # it's on our left -> lean right, away from it
-            bias, signal = c.emergency_vehicle_steer_bias, "right"
-        else:
-            bias, signal = -c.emergency_vehicle_steer_bias, "left"
+        lean_right = cx < FRAME_CENTER_X  # it's on our left -> lean right, away from it
+        # 0 = just entered reaction distance, 1 = right on top of it -- used
+        # to scale both the steer lean and the speed cap smoothly instead of
+        # snapping straight to a fixed crawl the instant it's noticed
+        proximity = 1.0 - max(0.0, min(1.0, nearest.distance_m / c.emergency_vehicle_reaction_distance_m))
+        bias_mag = c.emergency_vehicle_steer_bias * (0.45 + 0.55 * proximity)
+        bias = bias_mag if lean_right else -bias_mag
+        signal = "right" if lean_right else "left"
+
+        if self._ev_committed_stop:
+            if nearest.distance_m > c.emergency_vehicle_resume_distance_m:
+                self._ev_committed_stop = False
+            else:
+                events.append(f"emergency_vehicle: pulled over, holding stop while it passes "
+                               f"({nearest.distance_m:.1f}m)")
+                return bias, signal, 0.0
+
+        if nearest.distance_m < c.emergency_vehicle_stop_distance_m:
+            self._ev_committed_stop = True
+            events.append(f"emergency_vehicle: pulling over and stopping, {nearest.distance_m:.1f}m away")
+            return bias, signal, 0.0
+
+        speed_cap = c.emergency_vehicle_yield_speed_mps * (1.0 - 0.5 * proximity)
         events.append(f"emergency_vehicle: yielding, active light bar {nearest.distance_m:.1f}m away")
-        return bias, signal, c.emergency_vehicle_yield_speed_mps
+        return bias, signal, max(0.0, speed_cap)
+
+    @staticmethod
+    def _lookahead_offset_norm(lane: LaneResult) -> Optional[float]:
+        """A second, farther-ahead lane-offset estimate taken near the top
+        of the detected lane lines (as opposed to `lane.offset_norm`, which
+        is evaluated close to the car) -- blending this in gives the
+        steering controller a pure-pursuit-style preview of where the road
+        is headed instead of only correcting for where it already drifted,
+        which is what was causing oscillation/curve-cutting on bends.
+        Returns None if either lane line wasn't actually detected this
+        frame (caller should just fall back to the near-field offset)."""
+        if lane.left_line is None or lane.right_line is None:
+            return None
+        # line tuples are (x_bottom, y_bottom, x_top, y_top, max_y_seen)
+        far_left_x, far_right_x = lane.left_line[2], lane.right_line[2]
+        far_width = far_right_x - far_left_x
+        if far_width < 20:  # degenerate/crossed lines -- not trustworthy
+            return None
+        far_center = (far_left_x + far_right_x) / 2.0
+        far_offset_px = FRAME_CENTER_X - far_center
+        return max(-2.5, min(2.5, far_offset_px / (far_width / 2.0)))
 
     @staticmethod
     def _bbox_overlaps(a, b) -> bool:
@@ -165,7 +225,7 @@ class DrivingPolicy:
 
     def _target_speed(self, lane: LaneResult, detections: List[Detection],
                        light: Optional[TrafficLightDetection], events: List[str],
-                       confirmed_ev_boxes: Optional[list] = None) -> float:
+                       confirmed_ev_boxes: Optional[list] = None, dt: float = 0.05) -> float:
         c = self.cfg
         confirmed_ev_boxes = confirmed_ev_boxes or []
         target = c.cruise_speed_mps
@@ -189,15 +249,41 @@ class DrivingPolicy:
         lead = next((d for d in detections if d.cls == "vehicle"
                      and abs((d.bbox[0] + d.bbox[2]) / 2 - 480) < c.vehicle_lane_margin_px), None)
         if lead is not None:
+            # Closing-speed / time-to-collision anticipation: distance alone
+            # only reacts once a lead car is already close, which is too
+            # late for a sudden cut-in or a lead car braking hard right in
+            # front of us. Estimating how fast the gap is actually shrinking
+            # frame-to-frame (closing_speed) and reacting to the *time* that
+            # implies until contact catches these cases well before distance
+            # alone would -- the same anticipation a real radar-based ACC
+            # system gets for free that a single-frame vision distance
+            # estimate doesn't.
+            closing_speed = 0.0
+            if self._last_lead_distance is not None and dt > 1e-3:
+                closing_speed = max(0.0, (self._last_lead_distance - lead.distance_m) / dt)
+            self._last_lead_distance = lead.distance_m
+            ttc = (lead.distance_m / closing_speed) if closing_speed > 0.5 else float("inf")
+
             safe_gap = max(c.min_follow_gap_m, target * c.follow_time_headway_s)
-            if lead.distance_m < safe_gap:
+            if ttc < c.ttc_hard_brake_s:
+                target = 0.0
+                events.append(f"hard_brake: closing fast on lead car (TTC {ttc:.1f}s)")
+            elif lead.distance_m < safe_gap or ttc < c.ttc_caution_s:
                 frac = max(0.0, (lead.distance_m - c.hard_brake_gap_m) /
                            max(1.0, safe_gap - c.hard_brake_gap_m))
+                if ttc < c.ttc_caution_s:
+                    # scale down further the faster we're closing, even if
+                    # the raw gap itself still looks comfortable
+                    ttc_frac = max(0.0, min(1.0, ttc / c.ttc_caution_s))
+                    frac = min(frac, ttc_frac)
                 target = min(target, target * frac)
-                events.append(f"adaptive_cruise: lead car {lead.distance_m:.1f}m ahead")
+                tag = "closing" if ttc < c.ttc_caution_s else f"{lead.distance_m:.1f}m ahead"
+                events.append(f"adaptive_cruise: lead car {tag}")
             if lead.distance_m < c.hard_brake_gap_m:
                 target = 0.0
                 events.append("hard_brake: lead car too close")
+        else:
+            self._last_lead_distance = None
 
         # traffic-light compliance
         if light is not None and light.distance_m < c.light_reaction_distance_m:
@@ -257,16 +343,41 @@ class DrivingPolicy:
 
         ev_bias, turn_signal, ev_speed_cap = self._handle_emergency_vehicles(ev_signals or [], events)
 
-        # steering: PID on lane offset + curvature feedforward + a lean away
-        # from an active emergency vehicle, if one is present
-        error = -lane.offset_norm + ev_bias
+        # steering: PID on a near+far blended lane offset (pure-pursuit-style
+        # lookahead -- see _lookahead_offset_norm) + curvature feedforward +
+        # a lean away from an active emergency vehicle, if one is present.
+        # The PID's derivative term still measures off the near-field offset
+        # alone (lower-noise, and avoids derivative kick from the far point
+        # jumping around when a lane line briefly drops out).
+        lookahead_offset = self._lookahead_offset_norm(lane)
+        if lookahead_offset is None:
+            blended_offset = lane.offset_norm
+        else:
+            w = max(0.0, min(1.0, c.lookahead_weight))
+            blended_offset = (1 - w) * lane.offset_norm + w * lookahead_offset
+        error = -blended_offset + ev_bias
         steer = self.steer_pid.step(error, lane.offset_norm, dt)
         steer += c.curvature_feedforward * lane.curvature
+
+        # Optional: blend in a trained imitation model's steering suggestion
+        # (Pro tier only, and only if models/imitation_model.joblib exists --
+        # see train_model.py). Throttle/brake and every safety override below
+        # (e-braking, red lights, EV yield/stop, disengage) stay entirely
+        # rule-based regardless, so a learned model can only ever nudge how
+        # the car steers, never override why it slows or stops.
+        if self.imitation_model is not None and c.imitation_blend_weight > 0:
+            features = extract_features(lane, detections, light, ev_signals, speed_mps)
+            learned = self.imitation_model.predict(features)
+            if learned is not None:
+                w = max(0.0, min(1.0, c.imitation_blend_weight))
+                steer = (1 - w) * steer + w * learned[0]
+                events.append(f"imitation: blended learned steer (weight={w:.2f})")
+
         steer = max(-1.0, min(1.0, steer))
 
         confirmed_ev_boxes = [e.bbox for e in (ev_signals or []) if e.flashing]
         effective_light = self._resolve_light(light, speed_mps, dt, events)
-        target_speed = self._target_speed(lane, detections, effective_light, events, confirmed_ev_boxes)
+        target_speed = self._target_speed(lane, detections, effective_light, events, confirmed_ev_boxes, dt)
         if ev_speed_cap is not None:
             target_speed = min(target_speed, ev_speed_cap)
         speed_error = target_speed - speed_mps
