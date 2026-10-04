@@ -63,22 +63,39 @@ def _auto_calibrate(cal: Calibration) -> Calibration:
 def _console_loop(runner: LiveRunner) -> None:
     print("\nNo tkinter/Pillow overlay available -- printing status to this console instead.")
     print("Press Ctrl+C to stop (or F9 from anywhere, including inside the game).\n")
+    printed_anything = False
+    waited = 0.0
     try:
         while True:
+            if not runner.is_alive():
+                print("\n[autopilot] the driving thread has stopped unexpectedly -- "
+                      "see any error above. Exiting.")
+                return
             t = runner.get_telemetry()
             if t:
+                printed_anything = True
                 evs = t.get("emergency_vehicles") or []
                 ev_flag = " [EV!]" if any(e.get("flashing") for e in evs) else ""
                 sig = f" signal={t.get('turn_signal')}" if t.get("turn_signal") else ""
+                err = t.get("error")
+                err_flag = f"  !! {err}" if err else ""
                 line = (f"\rspeed={t.get('speed_mph', 0):5.1f}mph  "
                         f"target={t.get('target_speed_mph', 0):5.1f}mph  "
                         f"status={str(t.get('status', '--')):18s}  "
-                        f"engaged={t.get('engaged')!s:5s}{sig}{ev_flag}   ")
+                        f"engaged={t.get('engaged')!s:5s}{sig}{ev_flag}{err_flag}   ")
                 sys.stdout.write(line)
                 sys.stdout.flush()
+            else:
+                waited += 0.2
+                if not printed_anything and waited > 5.0:
+                    print("\n[autopilot] still no telemetry after 5s -- the capture/perception "
+                          "loop may not be seeing valid frames yet. Still running, will keep "
+                          "printing once a frame comes through; Ctrl+C to give up.")
+                    waited = -1e9  # only warn once
             time.sleep(0.2)
     except KeyboardInterrupt:
         print("\nStopping...")
+
 
 
 def main():

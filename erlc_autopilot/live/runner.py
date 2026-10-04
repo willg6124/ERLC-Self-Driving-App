@@ -111,6 +111,13 @@ class LiveRunner:
         self.set_engaged(False)
         self.actuator.emergency_stop()
 
+    def is_alive(self) -> bool:
+        """False if the background driving thread has died outright (should
+        no longer happen -- `_run` now catches every per-tick exception
+        itself -- but kept as a last-resort check so the console/overlay
+        can say something useful instead of just going quiet forever)."""
+        return bool(self._thread and self._thread.is_alive())
+
     def honk(self) -> None:
         self.actuator.honk()
 
@@ -125,8 +132,11 @@ class LiveRunner:
         return self._last_speed_mps, False
 
     def _run(self) -> None:
+        import traceback
+
         last = time.time()
         last_throttle, last_brake = 0.0, 0.0
+        consecutive_errors = 0
         while self._running:
             now = time.time()
             elapsed = now - last
@@ -136,52 +146,79 @@ class LiveRunner:
             dt = max(1e-3, now - last)
             last = now
 
-            frame = self.frame_source.get_frame()
-            if frame is None:
-                # no frame yet (capture just started, or game window
-                # minimized/occluded) -- hold last actuation rather than
-                # spin hot or feed garbage into perception
-                time.sleep(0.01)
-                continue
+            try:
+                frame = self.frame_source.get_frame()
+                if frame is None:
+                    # no frame yet (capture just started, or game window
+                    # minimized/occluded) -- hold last actuation rather than
+                    # spin hot or feed garbage into perception
+                    time.sleep(0.01)
+                    continue
 
-            speed_mps, speed_is_real = self._measure_speed(frame, dt, last_throttle, last_brake)
-            self._last_speed_mps = speed_mps
+                speed_mps, speed_is_real = self._measure_speed(frame, dt, last_throttle, last_brake)
+                self._last_speed_mps = speed_mps
 
-            result = self.pipeline.tick(frame, speed_mps, dt)
-            cmd = result.command
-            last_throttle, last_brake = cmd.throttle, cmd.brake
+                result = self.pipeline.tick(frame, speed_mps, dt)
+                cmd = result.command
+                last_throttle, last_brake = cmd.throttle, cmd.brake
 
-            with self.lock:
-                engaged = self._engaged
-            cmd.engaged = cmd.engaged and engaged
-            self.actuator.apply(cmd)
-            if self._advance_sim is not None:
-                self._advance_sim(cmd, dt)
+                with self.lock:
+                    engaged = self._engaged
+                cmd.engaged = cmd.engaged and engaged
+                self.actuator.apply(cmd)
+                if self._advance_sim is not None:
+                    self._advance_sim(cmd, dt)
 
-            ok, buf = cv2.imencode(".jpg", result.debug_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-            telemetry = {
-                "speed_mph": round(speed_mps * 2.23694, 1),
-                "speed_is_real": speed_is_real,
-                "target_speed_mph": round(cmd.target_speed * 2.23694, 1),
-                "status": cmd.status,
-                "engaged": cmd.engaged,
-                "turn_signal": cmd.turn_signal,
-                "steer": round(cmd.steer, 3),
-                "throttle": round(cmd.throttle, 2),
-                "brake": round(cmd.brake, 2),
-                "fps": round(result.fps, 1),
-                "model_tier": self.config.model_tier,
-                "emergency_vehicles": [
-                    {"distance_m": round(e.distance_m, 1), "flashing": e.flashing,
-                     "confidence": round(e.confidence, 2)}
-                    for e in result.emergency_vehicles
-                ],
-                "events": list(cmd.events),
-            }
-            with self.lock:
-                if ok:
-                    self.state.frame_jpeg = buf.tobytes()
-                self.state.telemetry = telemetry
+                ok, buf = cv2.imencode(".jpg", result.debug_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                telemetry = {
+                    "speed_mph": round(speed_mps * 2.23694, 1),
+                    "speed_is_real": speed_is_real,
+                    "target_speed_mph": round(cmd.target_speed * 2.23694, 1),
+                    "status": cmd.status,
+                    "engaged": cmd.engaged,
+                    "turn_signal": cmd.turn_signal,
+                    "steer": round(cmd.steer, 3),
+                    "throttle": round(cmd.throttle, 2),
+                    "brake": round(cmd.brake, 2),
+                    "fps": round(result.fps, 1),
+                    "model_tier": self.config.model_tier,
+                    "emergency_vehicles": [
+                        {"distance_m": round(e.distance_m, 1), "flashing": e.flashing,
+                         "confidence": round(e.confidence, 2)}
+                        for e in result.emergency_vehicles
+                    ],
+                    "events": list(cmd.events),
+                    "error": None,
+                }
+                with self.lock:
+                    if ok:
+                        self.state.frame_jpeg = buf.tobytes()
+                    self.state.telemetry = telemetry
+                consecutive_errors = 0
+            except Exception as exc:
+                # A perception/control/actuation hiccup must never be able
+                # to silently kill the whole driving thread again (this is
+                # exactly what happened when a missing Tesseract install
+                # threw out of the speed reader uncaught) -- release the
+                # keys to a safe neutral state, surface the error in
+                # telemetry/console, and keep the loop alive so a transient
+                # problem doesn't permanently end the drive.
+                consecutive_errors += 1
+                try:
+                    self.actuator.release_all()
+                except Exception:
+                    pass
+                print(f"\n[autopilot] tick error ({exc.__class__.__name__}: {exc}) -- "
+                      f"releasing keys and continuing.")
+                if consecutive_errors <= 3 or consecutive_errors % 50 == 0:
+                    traceback.print_exc()
+                with self.lock:
+                    self.state.telemetry = {
+                        **self.state.telemetry,
+                        "status": "error",
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    }
+                time.sleep(0.2)
 
     def get_frame(self) -> bytes:
         with self.lock:

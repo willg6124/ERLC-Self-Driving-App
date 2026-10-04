@@ -161,6 +161,16 @@ class KeyboardActuator:
             self._thread.join(timeout=1.0)
         self._release_all()
 
+    def release_all(self) -> None:
+        """Public wrapper so callers outside this module (e.g. the
+        runner's error handler) can snap back to a safe all-keys-up state
+        without reaching into a private method."""
+        with self._lock:
+            self._steer = 0.0
+            self._throttle = 0.0
+            self._brake = 0.0
+        self._release_all()
+
     def apply(self, command) -> None:
         """Called once per perception tick (~20 Hz); just updates the
         target state that the PWM thread (running at `PWM_HZ`) actuates

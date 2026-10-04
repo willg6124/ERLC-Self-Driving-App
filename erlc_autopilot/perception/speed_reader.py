@@ -27,10 +27,10 @@ import numpy as np
 try:
     import pytesseract
 
-    _HAS_TESSERACT = True
+    _HAS_TESSERACT_PACKAGE = True
 except Exception:
     pytesseract = None
-    _HAS_TESSERACT = False
+    _HAS_TESSERACT_PACKAGE = False
 
 MPH_TO_MPS = 0.44704
 
@@ -47,9 +47,31 @@ class SpeedReader:
     def __init__(self, config: Optional[SpeedReaderConfig] = None):
         self.cfg = config or SpeedReaderConfig()
         self._dead_reckon_mps: float = 0.0
+        # Having the `pytesseract` *Python package* importable only means
+        # pip installed a thin wrapper -- it still shells out to a separate
+        # `tesseract` system binary that has to be installed and on PATH
+        # (see requirements.txt / README). If that binary is missing,
+        # pytesseract raises TesseractNotFoundError the first time it's
+        # actually called, not at import time, so this has to be checked
+        # (and cached) lazily rather than trusted from the import alone --
+        # letting that exception escape uncaught previously crashed the
+        # entire background driving thread on the very first frame with no
+        # further output, which looked like the app just silently hanging.
+        self._tesseract_ok: Optional[bool] = None if _HAS_TESSERACT_PACKAGE else False
+        self._warned = False
+
+    def _check_tesseract(self) -> bool:
+        if self._tesseract_ok is not None:
+            return self._tesseract_ok
+        try:
+            pytesseract.get_tesseract_version()
+            self._tesseract_ok = True
+        except Exception:
+            self._tesseract_ok = False
+        return self._tesseract_ok
 
     def available(self) -> bool:
-        return _HAS_TESSERACT
+        return self._check_tesseract()
 
     def _crop(self, frame: np.ndarray) -> np.ndarray:
         h, w = frame.shape[:2]
@@ -64,7 +86,7 @@ class SpeedReader:
         """OCR'd speed in mph, or None if OCR isn't available or didn't
         find a confident digit string this frame (caller should fall back
         to dead reckoning / the previous good reading)."""
-        if not _HAS_TESSERACT:
+        if not self._check_tesseract():
             return None
         roi = self._crop(frame)
         if roi.size == 0:
@@ -76,8 +98,19 @@ class SpeedReader:
         # tuned for document-sized text, not a 20px-tall HUD element)
         _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
         thresh = cv2.resize(thresh, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
-        text = pytesseract.image_to_string(
-            thresh, config="--psm 7 -c tessedit_char_whitelist=0123456789")
+        try:
+            text = pytesseract.image_to_string(
+                thresh, config="--psm 7 -c tessedit_char_whitelist=0123456789")
+        except Exception:
+            # the binary passed the startup check but failed on a real call
+            # (permissions, a corrupt install, etc.) -- disable permanently
+            # rather than re-attempting (and re-failing) every single frame
+            self._tesseract_ok = False
+            if not self._warned:
+                print("Speed OCR stopped working mid-run -- falling back to the "
+                      "throttle/brake estimate for the rest of this session.")
+                self._warned = True
+            return None
         digits = re.sub(r"[^0-9]", "", text)
         if not digits:
             return None
@@ -88,6 +121,7 @@ class SpeedReader:
         if mph > 200:  # OCR misread guard
             return None
         return mph
+
 
     def estimate_mps(self, frame: np.ndarray, dt: float, throttle: float, brake: float) -> Tuple[float, bool]:
         """Best available speed estimate in m/s, plus whether it came from

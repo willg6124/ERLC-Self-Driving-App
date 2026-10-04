@@ -132,13 +132,18 @@ def run_overlay(runner: LiveRunner) -> None:
             else:
                 ev_banner.pack_forget()
 
+            err = t.get("error")
             signal = t.get("turn_signal")
-            if signal:
-                signal_label.config(text="signal: " + str(signal).upper())
+            if err:
+                signal_label.config(text="error: " + str(err)[:48], fg=BAD)
+            elif signal:
+                signal_label.config(text="signal: " + str(signal).upper(), fg=MUTED)
             elif t.get("speed_is_real") is False:
-                signal_label.config(text="speed: estimated (no OCR)")
+                signal_label.config(text="speed: estimated (no OCR)", fg=MUTED)
             else:
-                signal_label.config(text="")
+                signal_label.config(text="", fg=MUTED)
+        elif not runner.is_alive():
+            status_label.config(text="driving thread stopped", fg=BAD)
 
         frame_bytes = runner.get_frame()
         if frame_bytes:
