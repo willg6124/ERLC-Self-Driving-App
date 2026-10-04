@@ -286,6 +286,20 @@ improve (rewards are negative — closer to 0 is better) and stop early
 with `Ctrl+C` whenever you're happy, since the checkpoint is always
 already saved.
 
+**Don't manually crank `AutopilotConfig.imitation_blend_weight` up for
+this model.** It's only ever validated (via `.devscratch/test_driving.py`)
+at the shipped default (0.35), where it matches or slightly improves on
+the pure rule-based baseline across every scripted test scenario. Pushed
+up to 0.6 in testing, the exact same checkpoint caused a severe
+regression (dozens of collisions) specifically in a long (700-tick)
+scenario — the training episodes are a few hundred ticks long, so a
+heavily-weighted model can accumulate steering drift over a much longer
+real drive than it ever experienced during training. 0.35 leaves the
+rule-based PID/lookahead steering clearly in charge, which is why it
+stays safe; treat higher weights as experimental and re-validate with
+`.devscratch/test_driving.py` (or just drive more cautiously and watch
+closely) before trusting them.
+
 ## Development / testing without Roblox
 
 Tune the CV/control stack against the simulator:
@@ -325,3 +339,6 @@ Windows or Roblox.
   to open or crashes, `run_live.py` catches it and keeps driving with
   plain console output, so the autopilot itself is never blocked by it.
   Pass `--no-overlay` to skip it outright.
+- The self-trained RL model (`train_rl.py`) is only validated at the
+  default blend weight — see the warning in "Self-training" above before
+  turning `imitation_blend_weight` up for it.
