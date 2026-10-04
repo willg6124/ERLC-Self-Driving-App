@@ -28,6 +28,8 @@ body { margin: 0; font-family: 'Segoe UI', system-ui, sans-serif; background: va
 .banner { border-radius: 10px; padding: 12px 14px; font-size: 0.88rem; margin: 12px 0; }
 .banner-info { background: #112233; border: 1px solid #1f5f8a; color: #bfe6ff; }
 .banner-warn { background: #2a1f10; border: 1px solid #8a5f1f; color: #ffdca6; }
+.js-error { margin-top: 10px; background: #3a1414; border: 1px solid var(--bad); color: #ffc9ce;
+            font-size: 0.78rem; padding: 8px 10px; border-radius: 8px; font-family: monospace; }
 
 /* ---------- wizard ---------- */
 .wizard-body { display: flex; align-items: flex-start; justify-content: center; min-height: 100vh; padding: 30px 16px; }

@@ -62,19 +62,72 @@ def main():
         try:
             import webview  # pywebview
 
-            window = webview.create_window("ERLC Autopilot", url, width=760, height=720)
-            webview.start()
+            window = webview.create_window("ERLC Autopilot", url, width=760, height=760)
+            _watch_for_overlay(window, url)
+            # Prefer a modern Chromium-based renderer explicitly. Without
+            # this, pywebview's auto-detection can silently fall back to
+            # the legacy Internet-Explorer-based "mshtml" engine on
+            # Windows machines where the Edge WebView2 Runtime isn't
+            # registered for this Python process -- that engine has no
+            # fetch()/arrow-functions/async-await, which makes every
+            # button in the UI silently do nothing (the JS errors out
+            # before it can even attach the click handlers). The UI's own
+            # JS is now written to tolerate that engine too (see
+            # live/static/*.js), but getting a real modern renderer is
+            # strictly better, so try for one first.
+            try:
+                webview.start(gui="edgechromium")
+            except Exception:
+                webview.start()
             return
         except Exception as exc:
             print(f"[ERLC Autopilot] Native window unavailable ({exc}); "
                   f"open {url} in your browser instead.")
 
     print(f"[ERLC Autopilot] Open {url} in your browser. Press Ctrl+C to quit.")
+    print("[ERLC Autopilot] If buttons don't respond in the native window next "
+          "time, install the Microsoft Edge WebView2 Runtime, or just keep "
+          "using --no-window + a normal browser tab -- functionally identical.")
     try:
         while True:
             time.sleep(1.0)
     except KeyboardInterrupt:
         pass
+
+
+def _watch_for_overlay(window, base_url: str):
+    """Once setup finishes, shrink the window from the full wizard size
+    down to something that actually looks like the small HUD overlay it's
+    now showing, instead of leaving a large mostly-blank window. Purely
+    cosmetic and best-effort -- older pywebview versions without
+    resize()/move() just keep the original window size."""
+    import threading
+    import urllib.request
+
+    def _poll():
+        resized = False
+        while True:
+            time.sleep(1.5)
+            if resized:
+                continue
+            try:
+                with urllib.request.urlopen(base_url + "api/telemetry", timeout=2) as resp:
+                    import json
+                    data = json.loads(resp.read().decode("utf-8"))
+                if data.get("status") not in (None, "not_started"):
+                    try:
+                        window.resize(340, 520)
+                    except Exception:
+                        pass
+                    try:
+                        window.move(40, 40)
+                    except Exception:
+                        pass
+                    resized = True
+            except Exception:
+                pass
+
+    threading.Thread(target=_poll, daemon=True).start()
 
 
 if __name__ == "__main__":
