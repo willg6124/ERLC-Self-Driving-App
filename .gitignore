@@ -5,7 +5,9 @@ logs/
 models/*.caffemodel
 models/*.prototxt
 models/imitation_model.joblib
+models/rl_policy.joblib
 recordings/
+.devscratch/
 *.jpg
 *.jpeg
 *.png

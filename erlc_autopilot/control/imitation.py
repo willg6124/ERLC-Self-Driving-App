@@ -45,9 +45,25 @@ class ImitationModel:
 
 
 def build_imitation_model_for_tier(tier: str, model_dir: str = "models") -> Optional[ImitationModel]:
-    """Only the Pro tier ever blends a learned model in (see
-    AutopilotConfig.for_tier and DrivingPolicy.step) -- Lite/Standard stay
-    100% rule-based regardless of whether a trained model file exists."""
+    """Picks whichever trained steering model should be blended in, if
+    any -- same safety-gated blend hook either way (see
+    DrivingPolicy.step): only `steer` is ever used, throttle/brake and
+    every hard safety rule stay 100% rule-based regardless.
+
+    Preference order:
+      1. models/rl_policy.joblib -- the self-training (reinforcement
+         learning / Evolution Strategies, see train_rl.py) model. This
+         needs no recorded driving data at all, so it's offered on every
+         tier, not just Pro.
+      2. models/imitation_model.joblib -- the older imitation-learning
+         path (train_model.py), which does need you to have recorded
+         your own driving first. Kept Pro-only, same as before, so
+         Lite/Standard behavior is unchanged unless you've actually
+         trained an RL model.
+    """
+    rl_model = ImitationModel.load(os.path.join(model_dir, "rl_policy.joblib"))
+    if rl_model is not None:
+        return rl_model
     if tier != "pro":
         return None
     return ImitationModel.load(os.path.join(model_dir, "imitation_model.joblib"))

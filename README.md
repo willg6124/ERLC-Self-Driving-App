@@ -102,6 +102,14 @@ those are; this project doesn't check for you.
 | **Standard** | The default. Real MobileNet-SSD object detection if the weight files are present (see `models/README.md`), heuristic fallback otherwise. |
 | **Pro** | Tighter follow distance, snappier steering gains, more lookahead weight for a more assertive drive once you trust it. Also the only tier that blends in a model trained on *your own* recorded driving, if you've trained one (see "Training your own driving" below) — purely rule-based otherwise. |
 
+Every tier (not just Pro) will automatically pick up and blend in a
+self-trained model from `train_rl.py` if one exists at
+`models/rl_policy.joblib` — see "Self-training (no demonstrations
+needed)" below. If both `models/rl_policy.joblib` and a Pro-only imitation
+model exist, the self-trained one wins. Either way, throttle/brake and
+every safety behavior stay 100% rule-based; a learned model only ever
+nudges steering.
+
 ## How it actually works
 
 ```
@@ -225,6 +233,58 @@ keyboard state via the same `keyboard` package the F9 kill switch uses, so
 it's Windows-specific and, like a few other OS-level pieces of this
 project, not independently verified by me outside that stand-in; report
 back if it behaves unexpectedly on your machine.
+
+## Self-training (no demonstrations needed)
+
+Besides learning from *your* recorded driving (above), the bot can also
+just teach itself by driving the bundled simulator over and over and
+keeping whatever steering tweaks scored better — no recordings, no
+manual driving, no Roblox required for this step:
+
+```
+python train_rl.py --generations 60
+```
+
+That's it — once it finishes (or you `Ctrl+C` it; the latest checkpoint
+is always already on disk), just run `run_live.py` as usual and it picks
+the trained model up automatically, on every tier.
+
+How it works: it's an evolution strategy (ES), not deep RL with
+backprop/gradients — simpler to get right and plenty strong enough for a
+small steering network. Each generation it tries a population of small
+random tweaks to a compact neural net's weights (14 perception features →
+24 hidden units → steer/throttle/brake), plugs each candidate into the
+literal production `AutopilotPipeline` driving the literal bundled
+simulator for a short episode, scores it by how well it kept the lane
+centered, how smooth the steering was, and whether it collided or went
+off-road, and nudges the weights toward whatever the better-scoring
+candidates had in common. Repeat for N generations and the policy
+gradually gets better at lane-keeping on top of the existing rule-based
+PID/lookahead control, which still owns throttle, braking, and every
+safety behavior (e-braking, red lights, EV yield/stop, disengage) — the
+learned net can only ever nudge *how* it steers, same as the
+recording-based model above.
+
+Useful flags:
+
+| Flag | Default | What it does |
+|------|---------|---------------|
+| `--generations` | 60 | How many rounds of "try tweaks, keep the best" to run. More = better/slower. |
+| `--population` | 12 | How many weight variations to try per generation (auto-bumped to even — it uses mirrored +/- sampling). |
+| `--episode-ticks` | 150 | How long (in sim ticks) each candidate drives before being scored. |
+| `--workers` | 2 | Parallel worker processes (one simulator episode per core at a time). |
+| `--tier` | standard | Which config tier's simulator settings to train/evaluate against. |
+| `--out` | `models/rl_policy.joblib` | Where to save (and checkpoint) the trained model. |
+| `--checkpoint-every` | 5 | Save a checkpoint every N generations, so progress is never lost. |
+
+A full run can take a while (each episode is the real pipeline doing real
+CV work, not a cheap toy environment) — on a 2-core machine, budget
+roughly `population/2 * episode_ticks * ~30ms` per generation (e.g.
+`12/2 * 150 * 0.03s` ≈ 27s/generation, so 60 generations ≈ 27 minutes).
+It prints `mean_reward`/`best_reward` every generation so you can watch it
+improve (rewards are negative — closer to 0 is better) and stop early
+with `Ctrl+C` whenever you're happy, since the checkpoint is always
+already saved.
 
 ## Development / testing without Roblox
 
