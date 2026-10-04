@@ -28,9 +28,13 @@ pip install -r requirements.txt
 
 **Try it without ER:LC first** (works on any OS):
 
+In-browser simulator + live tuning dashboard (dev tool only):
 ```
-python run_dashboard.py          # in-browser simulator + live tuning dashboard (dev tool only)
-python run_live.py --sim         # the *real* app, driving the bundled simulator instead of ER:LC
+python run_dashboard.py
+```
+The *real* app, driving the bundled simulator instead of ER:LC:
+```
+python run_live.py --sim
 ```
 
 **Drive real ER:LC** (Windows only):
@@ -180,10 +184,17 @@ Every gain/threshold lives in `erlc_autopilot/config.py`
 
 ## Training your own driving (imitation learning)
 
+Drive manually while it just watches and logs:
 ```
-python run_live.py --record recordings/session1.csv   # drive manually, it just watches + logs
-python train_model.py                                   # trains on every recordings/*.csv
-python run_live.py --tier pro                            # now blended into the Pro tier
+python run_live.py --record recordings/session1.csv
+```
+Trains on every `recordings/*.csv`:
+```
+python train_model.py
+```
+Now blended into the Pro tier:
+```
+python run_live.py --tier pro
 ```
 
 1. `--record` runs the exact same perception stack (lane/object/traffic
@@ -217,9 +228,13 @@ back if it behaves unexpectedly on your machine.
 
 ## Development / testing without Roblox
 
+Tune the CV/control stack against the simulator:
 ```
-python run_dashboard.py     # tune the CV/control stack against the simulator
-python run_live.py --sim    # run the real app end-to-end, driving the bundled simulator
+python run_dashboard.py
+```
+Run the real app end-to-end, driving the bundled simulator:
+```
+python run_live.py --sim
 ```
 
 Both run entirely offline with no game required, which is how this whole
