@@ -319,18 +319,31 @@ class World:
             return -40.0 < rel < 250.0
         self.emergency_vehicles = [e for e in self.emergency_vehicles if _keep_ev(e)]
 
+        # scoring: off-road / collision detection (ground truth, for telemetry only)
+        cx, cy, cheading = self.centerline.pose_at(self.ego.s_hint)
+        ego_lateral_now = -(self.ego.x - cx) * math.sin(cheading) + (self.ego.y - cy) * math.cos(cheading)
+
         self.traffic.sort(key=lambda c: c.s)
         n = len(self.traffic)
         for i, car in enumerate(self.traffic):
             nxt = self.traffic[(i + 1) % n]
             gap = (nxt.s - car.s) % TRACK_LENGTH
+            # Car-following only ever looked at the NEXT traffic car, never
+            # at the ego -- so a stopped/slow ego sitting in a traffic
+            # car's own lane was completely invisible to it and it would
+            # just drive straight through (verified: this is exactly what
+            # caused dozens of "collisions" per test run, a trailing car
+            # plowing through a standing-start ego with zero braking,
+            # which is not something any perception/control fix on the
+            # autopilot side could ever prevent). Treat the ego as a
+            # same-lane obstacle for gap-keeping too.
+            if abs(car.lane_offset - ego_lateral_now) < CAR_WIDTH:
+                ego_gap = (self.ego.s_hint - car.s) % TRACK_LENGTH
+                if 0.0 < ego_gap < gap:
+                    gap = ego_gap
             car.update(dt, gap if gap > 0.1 else TRACK_LENGTH)
             car.s %= TRACK_LENGTH
-
-        # scoring: off-road / collision detection (ground truth, for telemetry only)
-        cx, cy, cheading = self.centerline.pose_at(self.ego.s_hint)
-        dx, dy = self.ego.x - cx, self.ego.y - cy
-        lateral = -dx * math.sin(cheading) + dy * math.cos(cheading)
+        lateral = ego_lateral_now
         if abs(lateral) > ROAD_HALF_WIDTH + SHOULDER:
             self.off_road_time += dt
         self._last_lateral = lateral

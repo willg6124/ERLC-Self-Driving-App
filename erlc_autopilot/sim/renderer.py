@@ -213,10 +213,25 @@ def render(world: World) -> Tuple[np.ndarray, dict]:
                     cv2.rectangle(frame, (p[0] - size, p[1] - 2), (p[0] + size, p[1] + 2), (230, 230, 230), -1)
 
     # other traffic
+    # NOTE: a lead car closer than 0.5m used to just vanish from the frame
+    # entirely (the `0.5 < d` lower bound excluded it) - i.e. right as the
+    # ego was about to rear-end someone, perception went completely blind
+    # to the one obstacle that mattered most, guaranteeing the collision
+    # with zero chance for ACC/braking to react. Clamping the draw
+    # distance to 0.5m (as the emergency-vehicle code already did) is not
+    # actually enough on its own, though: `_draw_box_at` projects all 4
+    # footprint corners, and a corner `half_l` behind the box's nominal
+    # center can still land behind the camera's near plane even when the
+    # center itself is safely in front, silently aborting the whole draw
+    # again. The clamp has to clear the vehicle's own half-length (plus a
+    # small margin) so every corner stays in front of the camera no
+    # matter how close the real distance is.
+    car_min_draw = CAR_LENGTH / 2 + 0.6
     for car in sorted(world.traffic, key=lambda c: -((c.s - ego.s_hint) % 2200.0)):
         d = (car.s - ego.s_hint) % 2200.0
-        if 0.5 < d < RENDER_DISTANCE:
-            bbox = _draw_box_at(frame, world, ego.s_hint + d, car.lane_offset, 0.0,
+        if d < RENDER_DISTANCE:
+            d_draw = max(d, car_min_draw)
+            bbox = _draw_box_at(frame, world, ego.s_hint + d_draw, car.lane_offset, 0.0,
                                  CAR_LENGTH, CAR_WIDTH, 1.5, car.color)
             if bbox:
                 meta["vehicles"].append({"bbox": bbox, "distance_m": round(d, 1)})
@@ -225,7 +240,7 @@ def render(world: World) -> Tuple[np.ndarray, dict]:
     for ev in sorted(world.emergency_vehicles, key=lambda c: -((c.s - ego.s_hint) % 2200.0)):
         d = (ev.s - ego.s_hint + 1100.0) % 2200.0 - 1100.0
         if -20.0 < d < RENDER_DISTANCE:
-            d_draw = max(d, 0.5)
+            d_draw = max(d, car_min_draw)
             body_color = EV_COLORS.get(ev.kind, (50, 50, 50))
             bbox = _draw_box_at(frame, world, ego.s_hint + d_draw, ev.lane_offset, 0.0,
                                  CAR_LENGTH, CAR_WIDTH, 1.6, body_color, label=ev.kind.upper())
@@ -244,11 +259,15 @@ def render(world: World) -> Tuple[np.ndarray, dict]:
                     {"bbox": bbox, "distance_m": round(d, 1), "kind": ev.kind,
                      "lights_on": ev.lights_on, "parked": ev.parked})
 
-    # pedestrians
+    # pedestrians -- same close-range vanish-and-never-brake bug as
+    # traffic above, same fix (clamp past the pedestrian box's own
+    # half-length so it doesn't silently disappear right before impact).
+    ped_min_draw = 0.25 + 0.6
     for p in world.pedestrians:
         d = (p.s - ego.s_hint) % 2200.0
-        if 0.5 < d < RENDER_DISTANCE:
-            bbox = _draw_box_at(frame, world, ego.s_hint + d, p.lateral, 0.0, 0.5, 0.5, 1.7, (40, 30, 200),
+        if d < RENDER_DISTANCE:
+            d_draw = max(d, ped_min_draw)
+            bbox = _draw_box_at(frame, world, ego.s_hint + d_draw, p.lateral, 0.0, 0.5, 0.5, 1.7, (40, 30, 200),
                                  label="PED")
             if bbox:
                 meta["pedestrians"].append({"bbox": bbox, "distance_m": round(d, 1)})
